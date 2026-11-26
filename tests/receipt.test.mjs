@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {parseReceiptSpec,prepareReceipt,parseEvaluation,calculateScore,selectMood,renderReceipt,evaluateReceipt,VALIDATORS,validatorMark} from '../src/receipt.mjs';
+import {freshLedger,admit,settle,reserveUnits,snapshot} from '../src/quota.mjs';
+import {MODEL} from '../src/handler.mjs';
+const spec=parseReceiptSpec(readFileSync(new URL('../runtime/receipt-evaluation.md',import.meta.url),'utf8'));
+const day=new Date().toISOString().slice(0,10), visitor='a'.repeat(36), history=[{role:'user',content:'I am tired but my boss says I am doing great.'},{role:'assistant',content:'Finishing the work and sustaining it are different questions. What happens when you ask for help?'}];
+const value=(scores=[86,86,86,86,86,86])=>({validators:Object.fromEntries(Object.keys(VALIDATORS).map((id,i)=>[id,{score:scores[i],note:'Relevant to the exchange.'}])),summary:'The answer recognized the reported workload.',result:'A useful distinction.'});
+const validated=(scores)=>parseEvaluation(JSON.stringify(value(scores)));
+function fixture(response,{settleFailure=false}={}){
+  const ledger=freshLedger(day); let runs=0, calls=[];
+  const messages=[{role:'user',content:'Test'}];
+  const first={visitor,id:'b'.repeat(36),kind:'chat',model:MODEL,units:reserveUnits(MODEL,messages,600)};
+  assert.equal(admit(ledger,first,Date.now()).ok,true);
+  assert.equal(settle(ledger,{visitor,id:first.id,success:true,usage:{prompt_tokens:50,completion_tokens:50}}).ok,true);
+  const env={AI:{run:async(model,args)=>{runs++;calls.push(args);assert.equal(model,MODEL);if(response instanceof Error)throw response;return response;}},HAY_LEDGER:{idFromName:n=>n,get:()=>({fetch:async(url,opt)=>{const b=JSON.parse(opt.body);const path=new URL(url).pathname;return Response.json(path==='/reserve'?admit(ledger,b,Date.now()):settleFailure?{ok:false}:settle(ledger,b));}})}};
+  return {env,ledger,get runs(){return runs;},calls};
+}
+const result=(v=value())=>({choices:[{message:{content:JSON.stringify(v)},finish_reason:'stop'}],usage:{prompt_tokens:900,completion_tokens:400}});
+test('all 101 scores preserve original band and exact deterministic mood',()=>{for(let n=0;n<=100;n++){const b=spec.bands.find(x=>n>=x[0]&&n<=x[1]);const r=selectMood(spec,n,day,1);assert.equal(r.emoji,b[2]);assert.equal(r.mood,b[3][(20261126+1)%b[3].length]);}assert.equal(selectMood(spec,70,day).emoji,spec.bands.find(b=>b[0]===70)[2]);});
+test('damaged source rejected',()=>assert.throws(()=>parseReceiptSpec('missing')));
+test('mean and grounding cap',()=>{assert.equal(calculateScore(validated([85,86,85,86,85,86])),86);assert.equal(calculateScore(validated([39,100,100,100,100,100])),59);assert.equal(calculateScore(validated([80,90,null,null,70,80])),80);});
+test('unassessed validators and insufficient evidence',()=>{assert.throws(()=>calculateScore(validated([null,90,90,90,90,90])));assert.throws(()=>calculateScore(validated([80,90,null,null,null,90])));assert.equal(validatorMark(null),'—');});
+test('invalid schema, scores, extra fields and forbidden text rejected',()=>{for(const mutate of [v=>v.total=100,v=>delete v.validators.return,v=>v.validators.return.score=101,v=>v.validators.return.score=1.2,v=>v.result='🙂',v=>v.result='a\nb',v=>v.result='<script>',v=>v.result='a '.repeat(19),v=>v.summary='foo@example.com']){const v=value();mutate(v);assert.throws(()=>parseEvaluation(JSON.stringify(v)));}assert.throws(()=>parseEvaluation('```json\n'+JSON.stringify(value())+'\n```'));});
+test('receipt exactly eleven lines with original labels and repeated emoji',()=>{const r=renderReceipt(spec,validated(),day);assert.equal(r.score,86);assert.equal(r.text.split('\n').length,11);assert.ok(r.text.endsWith(r.emoji));assert.ok(r.text.startsWith('HAT RECEIPT — ALIVE OS-2026-11-26-001'));});
+test('complete transcript only, all six exchanges supported, no scale in prompt',()=>{assert.throws(()=>prepareReceipt(spec,[]));assert.throws(()=>prepareReceipt(spec,[history[1],history[0]]));assert.throws(()=>prepareReceipt(spec,[history[0]]));const p=prepareReceipt(spec,Array.from({length:6},()=>history).flat());assert.equal(p.exchanges,6);assert.equal(p.messages.length,2);assert.ok(!p.messages[0].content.includes('Dead air. Only echoes.'));});
+test('actual reservation and settlement; one inference, duplicate blocked',async()=>{const f=fixture(result());const args={spec,trustedHistory:history,visitor};const r=await evaluateReceipt(f.env,args);assert.equal(r.status,200);assert.equal(r.data.receipt.score,86);assert.equal(r.data.quota.receipt_status,'complete');assert.equal(f.calls[0].max_completion_tokens,800);assert.equal(f.runs,1);assert.equal((await evaluateReceipt(f.env,args)).status,409);assert.equal(f.runs,1);});
+test('invalid or failed inference never prints a score; settles attempted call',async()=>{for(const response of [new Error('upstream'),{response:'not json'}, {choices:[{message:{content:JSON.stringify(value())},finish_reason:'length'}]}]){const f=fixture(response);const r=await evaluateReceipt(f.env,{spec,trustedHistory:history,visitor});assert.equal(r.status,502);assert.equal(r.data.receipt.status,'unavailable');assert.equal(r.data.receipt.score,undefined);assert.equal(f.runs,1);assert.equal(snapshot(f.ledger,visitor).receipt_status,'unavailable');}});
+test('oversized conversation rejected without burning held receipt',async()=>{const f=fixture(result());const long=Array.from({length:6},()=>[{role:'user',content:'漢'.repeat(1600)},{role:'assistant',content:'漢'.repeat(4000)}]).flat();const r=await evaluateReceipt(f.env,{spec,trustedHistory:long,visitor});assert.equal(r.status,400);assert.equal(f.runs,0);assert.equal(snapshot(f.ledger,visitor).receipt_status,'reserved');});
+test('settlement failure does not report completion',async()=>{const f=fixture(result(),{settleFailure:true});const r=await evaluateReceipt(f.env,{spec,trustedHistory:history,visitor});assert.equal(r.status,503);assert.equal(r.data.receipt.score,undefined);assert.equal(f.runs,1);});

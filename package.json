@@ -1,0 +1,17 @@
+{
+  "name": "aliveos",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "test": "node --experimental-loader ./tests/md-loader.mjs --test tests/*.test.mjs",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run --outdir .wrangler/check"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
