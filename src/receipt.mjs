@@ -87,8 +87,24 @@ export function calculateScore(evaluation) {
   const scores = ids.map(id=>evaluation.validators[id].score).filter(n=>n!==null);
   const {grounding,situation} = evaluation.validators;
   if (scores.length < 4 || grounding.score === null || situation.score === null) throw new Error('Insufficient evaluation evidence');
-  const mean = Math.round(scores.reduce((sum,n)=>sum+n,0)/scores.length);
+  const rounded = Math.round(scores.reduce((sum,n)=>sum+n,0)/scores.length);
+  const mean = scores.length===ids.length && scores.every(n=>n===100) ? 100 : Math.min(99,rounded);
   return grounding.score < 40 ? Math.min(mean,59) : mean;
+}
+// Narrow observable check, not a substitute for situational judgment. Plain lists are allowed.
+// Exempt explicit formatting requests and tasks where structured artifacts/code are expected.
+export function applyWritingCheck(evaluation, history) {
+  const structured = /\b(?:markdown|bullet(?:ed)?(?: points?)?|list|table|headings?|outline|step.by.step|instructions|checklist|format|code|recipe|report|template|compare|comparison)\b/i;
+  let violation=false;
+  for(let i=0;i<history.length;i+=2){
+    const request=history[i]?.content||'', answer=history[i+1]?.content||'';
+    if(structured.test(request)) continue;
+    const reportLines=answer.split(/\r?\n/).filter(line=>/^\s*(?:#{1,6}\s+|(?:[-*+] |\d+\.\s+)\s*\*\*[^*]+\*\*|\*\*[^*]+\*\*\s*:)/.test(line));
+    if(reportLines.length>=2){violation=true;break;}
+  }
+  if(!violation)return evaluation;
+  const old=evaluation.validators.language;
+  return {...evaluation,validators:{...evaluation.validators,language:{score:Math.min(old.score??79,79),note:'Repeated unrequested report-style Markdown departed from the plain conversational writing contract.'}}};
 }
 export function selectMood(spec,score,day,counter=1) {
   if (!Number.isInteger(score) || score<0 || score>100 || typeof day!=='string' ||
@@ -136,7 +152,7 @@ export async function evaluateReceipt(env,{spec,trustedHistory,visitor,counter=1
     const choice=response?.choices?.[0];
     if (choice?.finish_reason==='length') throw new Error('Incomplete evaluation');
     const evaluation=parseEvaluation(choice?.message?.content??response?.response);
-    receipt=renderReceipt(spec,evaluation,reservation.day,counter);
+    receipt=renderReceipt(spec,applyWritingCheck(evaluation,trustedHistory),reservation.day,counter);
   } catch { /* Never invent a score or retry. Account for the attempted call. */ }
   const settlement=await settleInference(env,{visitor,reservation,success:receipt!==null,usage});
   if (!settlement.ok) return fail('Receipt accounting could not be confirmed.',503);
