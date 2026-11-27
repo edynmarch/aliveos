@@ -99,20 +99,23 @@ export async function inferChat(env, prepared) {
       messages: prepared.messages,
       max_completion_tokens: LIMITS.completionTokens,
       temperature: 0.4,
+      // Cloudflare Gemma thinking can consume the whole completion budget.
+      ...(model === MODEL ? {chat_template_kwargs:{enable_thinking:false}} : {}),
       stream: false,
       store: false,
     });
     const choice = result?.choices?.[0];
-    const answer = choice?.message?.content ?? result?.response;
+    const answer = [choice?.message?.content, result?.response].find(v => typeof v === 'string' && v.trim());
+    const finish_reason = typeof choice?.finish_reason === 'string' ? choice.finish_reason : null;
     const usage = result?.usage && typeof result.usage === 'object' ? result.usage : null;
     if (typeof answer !== 'string' || !answer.trim()) {
-      return {status:502, data:{error:'No usable model answer. Please try again.', model, usage}};
+      return {status:502, data:{error:'No usable model answer. Please try again.', model, usage, finish_reason, reason:finish_reason === 'length' ? 'completion_budget_exhausted' : 'empty_completion'}};
     }
     return {status:200, data:{
       answer: answer.trim(), model,
       sources: prepared.sources.map(({id,title}) => ({id,title})),
       usage,
-      finish_reason: typeof choice?.finish_reason === 'string' ? choice.finish_reason : null,
+      finish_reason,
       conversation: {prior_exchanges: prepared.history.length / 2, history_mode: 'supplied context only'},
       receipt: {status:'not evaluated', note:'Inference completed; coherence evaluation not implemented.'},
     }};

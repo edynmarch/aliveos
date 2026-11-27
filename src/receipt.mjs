@@ -131,7 +131,7 @@ export async function evaluateReceipt(env,{spec,trustedHistory,visitor,counter=1
   if (!reservation.ok) return fail('Receipt is not available.',reservation.status||429,{reason:reservation.reason});
   let usage=null,receipt=null;
   try {
-    const response=await env.AI.run(model,{messages:prepared.messages,max_completion_tokens:QUOTA.receiptMaxOutput,temperature:0.1,stream:false,store:false});
+    const response=await env.AI.run(model,{messages:prepared.messages,max_completion_tokens:QUOTA.receiptMaxOutput,temperature:0.1,...(model===MODEL?{chat_template_kwargs:{enable_thinking:false}}:{}),stream:false,store:false});
     usage=response?.usage && typeof response.usage==='object'?response.usage:null;
     const choice=response?.choices?.[0];
     if (choice?.finish_reason==='length') throw new Error('Incomplete evaluation');
